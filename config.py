@@ -15,8 +15,9 @@ YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 
 ADMIN_ID = os.getenv('ADMIN_ID')
-if not ADMIN_ID:
-    raise ValueError("❌ ADMIN_ID не найден в .env файле!")
+# Optional for local testing without admin features.
+if ADMIN_ID:
+    ADMIN_ID = int(ADMIN_ID)
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -30,3 +31,4 @@ def load_business_data():
         return json.load(f)
 
 BUSINESS_DATA = load_business_data()
+

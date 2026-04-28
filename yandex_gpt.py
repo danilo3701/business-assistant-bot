@@ -1,187 +1,99 @@
 """
-Модуль для работы с YandexGPT API
-Содержит функции для отправки запросов и генерации ответов
+YandexGPT integration helpers.
+Supports graceful fallback when Yandex credentials are not configured.
 """
 
-import aiohttp
 import logging
-import json
 from typing import Optional
 
-# Настройка логирования
+import aiohttp
+
 logger = logging.getLogger(__name__)
 
-# URL для YandexGPT API
 YANDEX_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+AI_DISABLED_TEXT = (
+    "AI-ответы временно отключены. "
+    "Используйте кнопки меню: услуги, запись, мои записи, контакты и FAQ."
+)
+
+
+def is_yandex_configured() -> bool:
+    """Returns True if both Yandex credentials are provided."""
+    from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
+
+    return bool(YANDEX_API_KEY and YANDEX_FOLDER_ID)
+
 
 async def ask_yandex_gpt(
-    prompt: str, 
+    prompt: str,
     temperature: float = 0.6,
     max_tokens: int = 500,
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
 ) -> str:
-    """
-    Отправляет запрос к YandexGPT и возвращает ответ
-    
-    Аргументы:
-        prompt: текст запроса пользователя
-        temperature: температура генерации (0.0 - 1.0)
-        max_tokens: максимальное количество токенов в ответе
-        system_prompt: системный промпт (если нужен)
-    
-    Возвращает:
-        str: ответ от нейросети или сообщение об ошибке
-    """
-    
-    # Импортируем конфиг внутри функции, чтобы избежать циклических импортов
+    """Send prompt to YandexGPT or return fallback if disabled."""
     from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
-    
-    # Проверяем, что ключи не пустые
-    if not YANDEX_API_KEY:
-        logger.error("YANDEX_API_KEY is empty!")
-        return "❌ Ошибка: не настроен API-ключ YandexGPT. Проверьте переменные окружения."
-    
-    if not YANDEX_FOLDER_ID:
-        logger.error("YANDEX_FOLDER_ID is empty!")
-        return "❌ Ошибка: не указан Folder ID. Проверьте переменные окружения."
-    
-    # Убираем возможные пробелы в начале и конце
-    api_key = YANDEX_API_KEY.strip()
-    folder_id = YANDEX_FOLDER_ID.strip()
-    
-    logger.info(f"Using folder_id: {folder_id}")
-    logger.info(f"API key length: {len(api_key)}")
-    
-    # Формируем modelUri
-    model_uri = f"gpt://{folder_id}/yandexgpt-lite"
-    logger.info(f"Model URI: {model_uri}")
-    
-    # Заголовки запроса
+
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+        logger.info("YandexGPT disabled: missing credentials")
+        return AI_DISABLED_TEXT
+
+    model_uri = f"gpt://{YANDEX_FOLDER_ID.strip()}/yandexgpt-lite"
     headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json"
+        "Authorization": f"Api-Key {YANDEX_API_KEY.strip()}",
+        "Content-Type": "application/json",
     }
-    
-    # Формируем сообщения
-    messages = []
-    
-    # Системный промпт по умолчанию для бизнес-ассистента
+
     if system_prompt is None:
         system_prompt = (
             "Ты вежливый и дружелюбный помощник для клиентов салона красоты. "
-            "Отвечай кратко, по делу, но приветливо. "
-            "Если не знаешь ответа, предложи связаться с администратором."
+            "Отвечай кратко и по делу. Если не знаешь ответ, предложи связаться с администратором."
         )
-    
-    messages.append({
-        "role": "system",
-        "text": system_prompt
-    })
-    
-    messages.append({
-        "role": "user",
-        "text": prompt
-    })
-    
-    # Тело запроса
+
     data = {
         "modelUri": model_uri,
         "completionOptions": {
             "stream": False,
             "temperature": temperature,
-            "maxTokens": max_tokens
+            "maxTokens": max_tokens,
         },
-        "messages": messages
+        "messages": [
+            {"role": "system", "text": system_prompt},
+            {"role": "user", "text": prompt},
+        ],
     }
-    
-    logger.info(f"Sending request to YandexGPT with {len(messages)} messages")
-    
+
     try:
-        # Отправляем запрос
         async with aiohttp.ClientSession() as session:
             async with session.post(YANDEX_URL, headers=headers, json=data) as response:
-                
-                # Логируем статус ответа
-                logger.info(f"Response status: {response.status}")
-                
-                if response.status == 200:
-                    result = await response.json()
-                    logger.info("Successfully got response from YandexGPT")
-                    
-                    # Извлекаем ответ
-                    try:
-                        answer = result['result']['alternatives'][0]['message']['text']
-                        return answer.strip()
-                    except (KeyError, IndexError) as e:
-                        logger.error(f"Failed to parse response: {e}")
-                        logger.error(f"Response structure: {json.dumps(result, indent=2)[:500]}")
-                        return "❌ Ошибка при обработке ответа от нейросети."
-                
-                else:
-                    # Подробный вывод ошибки
-                    error_text = await response.text()
-                    logger.error(f"YandexGPT API error: {response.status}")
-                    logger.error(f"Error details: {error_text[:500]}")
-                    
-                    # Понятное сообщение для пользователя
-                    if response.status == 403:
-                        return "❌ Ошибка доступа к YandexGPT. Проверьте права сервисного аккаунта (роль ai.languageModels.user)."
-                    elif response.status == 401:
-                        return "❌ Ошибка авторизации. Неверный API-ключ."
-                    elif response.status == 429:
-                        return "❌ Превышен лимит запросов к YandexGPT. Попробуйте позже."
-                    elif response.status == 400:
-                        return f"❌ Неверный запрос к API. Проверьте Folder ID и модель. Детали: {error_text[:200]}"
-                    else:
-                        return f"❌ Ошибка YandexGPT (код {response.status}). Попробуйте позже."
-    
-    except aiohttp.ClientConnectorError as e:
-        logger.error(f"Connection error: {e}")
-        return "❌ Ошибка соединения с сервером YandexGPT. Проверьте интернет."
-    
-    except aiohttp.ClientError as e:
-        logger.error(f"Network error: {e}")
-        return "❌ Ошибка сети при обращении к YandexGPT."
-    
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        return f"❌ Непредвиденная ошибка: {str(e)}"
+                if response.status != 200:
+                    logger.warning("YandexGPT API error: %s", response.status)
+                    return "Сейчас не получилось получить AI-ответ. Попробуйте позже."
+
+                result = await response.json()
+                return result["result"]["alternatives"][0]["message"]["text"].strip()
+    except Exception:
+        logger.exception("YandexGPT request failed")
+        return "Сейчас не получилось получить AI-ответ. Попробуйте позже."
+
 
 async def generate_welcome(user_name: str) -> str:
-    """
-    Генерирует персонализированное приветствие для клиента
-    
-    Аргументы:
-        user_name: имя пользователя
-    
-    Возвращает:
-        str: тёплое приветствие
-    """
+    """Generate welcome text, fallback to static greeting if AI is disabled."""
+    if not is_yandex_configured():
+        return f"Здравствуйте, {user_name}!"
+
     prompt = (
-        f"Придумай короткое, тёплое приветствие для клиента {user_name}, "
-        f"который только что зашёл в бота салона красоты. "
-        f"Максимум 2 предложения. Будь дружелюбным."
+        f"Придумай короткое приветствие для клиента {user_name}, "
+        "который только что зашел в бот салона красоты. Максимум 2 предложения."
     )
     return await ask_yandex_gpt(prompt, temperature=0.8, max_tokens=100)
 
+
 async def generate_response(user_message: str, context: str = "") -> str:
-    """
-    Упрощённая функция для ответов на вопросы клиентов
-    
-    Аргументы:
-        user_message: сообщение пользователя
-        context: дополнительный контекст (например, информация о салоне)
-    
-    Возвращает:
-        str: ответ от нейросети
-    """
-    prompt = f"""
-Контекст (информация о салоне):
-{context}
-
-Вопрос клиента: {user_message}
-
-Ответь вежливо и полезно. Если вопрос не относится к услугам салона, 
-предложи связаться с администратором.
-"""
+    """Generate assistant response with optional context."""
+    prompt = (
+        "Контекст:\n"
+        f"{context}\n\n"
+        f"Вопрос клиента: {user_message}\n\n"
+        "Ответь вежливо и полезно."
+    )
     return await ask_yandex_gpt(prompt, temperature=0.7)
